@@ -1,0 +1,30 @@
+# Build outputs
+/bin/
+/obj/
+/publish/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS/JetBrains caches
+/.vs/
+/.idea/
+/.ionide/
+
+# Logs and diagnostics
+*.log
+*.dmp
+
+# NuGet
+/packages/
+*.nupkg
+*.snupkg
+.nuget/
+
+# Others
+Thumbs.db
+ehthumbs.db
+Desktop.ini
