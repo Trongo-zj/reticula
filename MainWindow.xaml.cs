@@ -9,6 +9,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -24,7 +25,9 @@ public partial class MainWindow : Window
     private const int Columns = 6;
     private const int Rows = 5;
     private const string TileIndexDataFormat = "ReticulaApp.TileIndex";
+    private static readonly JsonSerializerOptions PersistedTileJsonOptions = new() { WriteIndented = true };
 
+    private readonly string _stateFilePath;
     private Point? _dragStartPoint;
     private AppTile? _dragSourceTile;
 
@@ -33,8 +36,25 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Tiles = new ObservableCollection<AppTile>(Enumerable.Range(0, Columns * Rows).Select(_ => new AppTile()));
+        _stateFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ReticulaApp",
+            "tiles.json");
         InitializeComponent();
         DataContext = this;
+        LoadTilesFromStorage();
+        UpdateColumnColors();
+        Closing += (_, _) => PersistTiles();
+    }
+
+    private void UpdateColumnColors()
+    {
+        for (int i = 0; i < Tiles.Count; i++)
+        {
+            int col = i % Columns;
+            int group = col / 2;
+            Tiles[i].ColumnBrush = AppTile.ColumnGroupBrushes[group];
+        }
     }
 
     private void TileButton_Click(object sender, RoutedEventArgs e)
@@ -99,8 +119,8 @@ public partial class MainWindow : Window
 
         var currentPosition = e.GetPosition(null);
         var diff = currentPosition - _dragStartPoint.Value;
-        if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance &&
-            Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance)
+        if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance * 3 &&
+            Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance * 3)
         {
             return;
         }
@@ -211,6 +231,55 @@ public partial class MainWindow : Window
         HandleBackgroundDrop(e);
     }
 
+    private void ExportButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SaveFileDialog
+        {
+            Filter = "Archivo de exportación de Reticula (*.json)|*.json|Todos los archivos (*.*)|*.*",
+            FileName = $"reticula-{DateTime.Now:yyyyMMdd}.json",
+            Title = "Exportar cuadrícula"
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            ExportTilesTo(dialog.FileName);
+            MessageBox.Show(this, "Exportación completada correctamente.", "Exportación exitosa", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo exportar la cuadrícula.\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void ImportButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = "Archivo de exportación de Reticula (*.json)|*.json|Todos los archivos (*.*)|*.*",
+            Title = "Importar cuadrícula"
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            ImportTilesFrom(dialog.FileName);
+            MessageBox.Show(this, "Importación completada.", "Importación exitosa", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo importar la cuadrícula.\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void HandleBackgroundDrop(DragEventArgs e)
     {
         e.Handled = true;
@@ -220,7 +289,11 @@ public partial class MainWindow : Window
             int sourceIndex = (int)e.Data.GetData(TileIndexDataFormat);
             if (IsValidIndex(sourceIndex))
             {
-                Tiles[sourceIndex].Clear();
+                if (Tiles[sourceIndex].HasApp)
+                {
+                    Tiles[sourceIndex].Clear();
+                    PersistTiles();
+                }
             }
             return;
         }
@@ -239,6 +312,179 @@ public partial class MainWindow : Window
         }
 
         AssignAppToSlot(state.Value, freeSlot);
+    }
+
+    private void LoadTilesFromStorage()
+    {
+        try
+        {
+            if (!File.Exists(_stateFilePath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(_stateFilePath, Encoding.UTF8);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return;
+            }
+
+            var persistedTiles = JsonSerializer.Deserialize<List<PersistedTileData>>(json);
+            if (persistedTiles is null)
+            {
+                return;
+            }
+
+            ApplyPersistedTiles(persistedTiles);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error al cargar el estado de las aplicaciones: {ex}");
+        }
+    }
+
+    private void PersistTiles()
+    {
+        try
+        {
+            var persisted = CreatePersistedTileSnapshot();
+            EnsureStateDirectoryExists();
+            var json = JsonSerializer.Serialize(persisted, PersistedTileJsonOptions);
+            File.WriteAllText(_stateFilePath, json, Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error al guardar el estado de las aplicaciones: {ex}");
+        }
+    }
+
+    private void ExportTilesTo(string filePath)
+    {
+        var persisted = CreatePersistedTileSnapshot();
+        EnsureDirectoryForFile(filePath);
+        var json = JsonSerializer.Serialize(persisted, PersistedTileJsonOptions);
+        File.WriteAllText(filePath, json, Encoding.UTF8);
+    }
+
+    private void ImportTilesFrom(string filePath)
+    {
+        if (!File.Exists(filePath))
+        {
+            throw new FileNotFoundException("El archivo seleccionado no existe.", filePath);
+        }
+
+        string json = File.ReadAllText(filePath, Encoding.UTF8);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            throw new InvalidDataException("El archivo de importación está vacío.");
+        }
+
+        var persistedTiles = JsonSerializer.Deserialize<List<PersistedTileData>>(json);
+        if (persistedTiles is null)
+        {
+            throw new InvalidDataException("El archivo no contiene una cuadrícula válida.");
+        }
+
+        ApplyPersistedTiles(persistedTiles);
+        PersistTiles();
+    }
+
+    private List<PersistedTileData> CreatePersistedTileSnapshot() =>
+        Tiles.Select(tile => new PersistedTileData
+        {
+            DisplayName = tile.DisplayName,
+            CommandPath = tile.CommandPath ?? string.Empty,
+            LaunchPath = tile.LaunchPath,
+            Arguments = tile.Arguments,
+            WorkingDirectory = tile.WorkingDirectory,
+            IconLocation = tile.IconLocation
+        }).ToList();
+
+    private void ApplyPersistedTiles(IReadOnlyList<PersistedTileData> persistedTiles)
+    {
+        for (int i = 0; i < Tiles.Count; i++)
+        {
+            if (persistedTiles is not null && i < persistedTiles.Count)
+            {
+                var persisted = persistedTiles[i];
+                if (persisted is not null && !string.IsNullOrWhiteSpace(persisted.CommandPath))
+                {
+                    var state = CreateStateFromPersisted(persisted);
+                    if (state.HasApp)
+                    {
+                        Tiles[i].Apply(state);
+                        continue;
+                    }
+                }
+            }
+
+            Tiles[i].Clear();
+        }
+    }
+
+    private static void EnsureDirectoryForFile(string filePath)
+    {
+        var directory = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+    }
+
+    private void EnsureStateDirectoryExists() => EnsureDirectoryForFile(_stateFilePath);
+
+    private AppTileState CreateStateFromPersisted(PersistedTileData data)
+    {
+        string displayName = data.DisplayName ?? string.Empty;
+        ImageSource? icon = null;
+
+        if (!string.IsNullOrWhiteSpace(data.LaunchPath) && IsShellReference(data.LaunchPath))
+        {
+            if (TryGetShellItemInfo(data.LaunchPath, out var shellDisplayName, out var shellIcon))
+            {
+                if (string.IsNullOrWhiteSpace(displayName))
+                {
+                    displayName = shellDisplayName;
+                }
+
+                icon = shellIcon;
+            }
+        }
+
+        icon ??= LoadIcon(data.IconLocation, data.LaunchPath ?? data.CommandPath);
+
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            string? fallbackPath = data.LaunchPath;
+            if (!string.IsNullOrWhiteSpace(fallbackPath) && !IsShellReference(fallbackPath))
+            {
+                displayName = Path.GetFileNameWithoutExtension(fallbackPath) ?? fallbackPath;
+            }
+
+            if (string.IsNullOrWhiteSpace(displayName))
+            {
+                displayName = Path.GetFileNameWithoutExtension(data.CommandPath) ?? data.CommandPath;
+            }
+        }
+
+        return new AppTileState(
+            displayName,
+            data.CommandPath,
+            data.LaunchPath,
+            data.Arguments,
+            data.WorkingDirectory,
+            data.IconLocation,
+            icon);
+    }
+
+    private sealed class PersistedTileData
+    {
+        public string? DisplayName { get; set; }
+        public string CommandPath { get; set; } = string.Empty;
+        public string? LaunchPath { get; set; }
+        public string? Arguments { get; set; }
+        public string? WorkingDirectory { get; set; }
+        public string? IconLocation { get; set; }
     }
 
     private void PromptForApplicationSelection(int? targetIndex)
@@ -358,6 +604,8 @@ public partial class MainWindow : Window
         {
             Tiles[fromIndex].Clear();
         }
+
+        PersistTiles();
     }
 
     private void AssignAppToSlot(AppTileState state, int targetIndex, bool replaceExisting = false)
@@ -380,6 +628,7 @@ public partial class MainWindow : Window
         }
 
         Tiles[targetIndex].Apply(state);
+        PersistTiles();
     }
 
     private bool TryMakeRoom(int targetIndex, int? reservedIndex, out AppTileState? displacedState, out int? displacedDestination)
@@ -452,6 +701,7 @@ public partial class MainWindow : Window
                         shortcutInfo.TargetPath ?? shortcutInfo.CommandPath,
                         shortcutInfo.Arguments,
                         shortcutInfo.WorkingDirectory,
+                        shortcutInfo.IconLocation,
                         icon);
                     return true;
                 }
@@ -472,7 +722,7 @@ public partial class MainWindow : Window
                 string displayName = Path.GetFileNameWithoutExtension(path);
                 string? workingDirectory = Path.GetDirectoryName(path);
                 var icon = LoadIcon(path, path);
-                state = new AppTileState(displayName, path, path, null, workingDirectory, icon);
+                state = new AppTileState(displayName, path, path, null, workingDirectory, path, icon);
                 return true;
             }
         }
@@ -729,11 +979,11 @@ public partial class MainWindow : Window
 
         if (TryGetShellItemInfo(reference, out var displayName, out var icon))
         {
-            return new AppTileState(displayName, explorerPath, reference, reference, null, icon);
+            return new AppTileState(displayName, explorerPath, reference, reference, null, null, icon);
         }
 
         string fallbackName = GetFallbackNameFromShellReference(reference);
-        return new AppTileState(string.IsNullOrWhiteSpace(fallbackName) ? reference : fallbackName, explorerPath, reference, reference, null, null);
+        return new AppTileState(string.IsNullOrWhiteSpace(fallbackName) ? reference : fallbackName, explorerPath, reference, reference, null, null, null);
     }
 
     private static bool TryGetShellItemInfo(string reference, out string displayName, out ImageSource? icon)
@@ -1066,13 +1316,14 @@ public partial class MainWindow : Window
 
     public readonly struct AppTileState
     {
-        public AppTileState(string displayName, string commandPath, string? launchPath, string? arguments, string? workingDirectory, ImageSource? icon)
+        public AppTileState(string displayName, string commandPath, string? launchPath, string? arguments, string? workingDirectory, string? iconLocation, ImageSource? icon)
         {
             DisplayName = displayName;
             CommandPath = commandPath;
             LaunchPath = launchPath;
             Arguments = arguments;
             WorkingDirectory = workingDirectory;
+            IconLocation = iconLocation;
             Icon = icon;
         }
 
@@ -1081,6 +1332,7 @@ public partial class MainWindow : Window
         public string? LaunchPath { get; }
         public string? Arguments { get; }
         public string? WorkingDirectory { get; }
+        public string? IconLocation { get; }
         public ImageSource? Icon { get; }
 
         public bool HasApp => !string.IsNullOrWhiteSpace(CommandPath);
@@ -1093,9 +1345,24 @@ public partial class MainWindow : Window
         private string? _launchPath;
         private string? _arguments;
         private string? _workingDirectory;
+        private string? _iconLocation;
         private ImageSource? _icon;
+        private SolidColorBrush _columnBrush = new SolidColorBrush(Color.FromRgb(0x00, 0x4B, 0x76));
+
+        internal static readonly SolidColorBrush[] ColumnGroupBrushes = new[]
+        {
+            new SolidColorBrush(Color.FromRgb(0x00, 0x4B, 0x76)), // Cols 0-1: azul original
+            new SolidColorBrush(Color.FromRgb(0x00, 0x69, 0x5C)), // Cols 2-3: verde azulado
+            new SolidColorBrush(Color.FromRgb(0x4A, 0x14, 0x8C)), // Cols 4-5: púrpura
+        };
 
         public Guid Id { get; } = Guid.NewGuid();
+
+        public SolidColorBrush ColumnBrush
+        {
+            get => _columnBrush;
+            set => SetField(ref _columnBrush, value);
+        }
 
         public string? DisplayName
         {
@@ -1133,6 +1400,12 @@ public partial class MainWindow : Window
             private set => SetField(ref _icon, value);
         }
 
+        public string? IconLocation
+        {
+            get => _iconLocation;
+            private set => SetField(ref _iconLocation, value);
+        }
+
         public bool HasApp => !string.IsNullOrWhiteSpace(CommandPath);
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -1144,6 +1417,7 @@ public partial class MainWindow : Window
             LaunchPath = state.LaunchPath;
             Arguments = state.Arguments;
             WorkingDirectory = state.WorkingDirectory;
+            IconLocation = state.IconLocation;
             Icon = state.Icon;
             OnPropertyChanged(nameof(HasApp));
         }
@@ -1155,11 +1429,12 @@ public partial class MainWindow : Window
             LaunchPath = null;
             Arguments = null;
             WorkingDirectory = null;
+            IconLocation = null;
             Icon = null;
             OnPropertyChanged(nameof(HasApp));
         }
 
-        public AppTileState CreateSnapshot() => new AppTileState(DisplayName ?? string.Empty, CommandPath ?? string.Empty, LaunchPath, Arguments, WorkingDirectory, Icon);
+        public AppTileState CreateSnapshot() => new AppTileState(DisplayName ?? string.Empty, CommandPath ?? string.Empty, LaunchPath, Arguments, WorkingDirectory, IconLocation, Icon);
 
         private void OnPropertyChanged(string propertyName)
         {
